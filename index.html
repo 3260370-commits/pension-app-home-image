@@ -290,23 +290,15 @@
   </div>
 
   <div class="alloc-card" id="sync-card">
-    <div class="alloc-title">GitHub 연동 (토큰 불필요)</div>
-    <div style="font-size:11.5px;color:var(--ink-soft);line-height:1.6;margin-bottom:10px;">
-      아래 버튼을 누르면 현재 종목 데이터가 <b>holdings.json</b> 파일로 다운로드됩니다.
-      GitHub 저장소 페이지에 이 파일을 끌어다 놓으면(드래그 앤 드롭) 기존 파일이 자동으로
-      교체되며, 별도 토큰이나 로그인 절차 없이 그대로 커밋됩니다.
+    <div class="alloc-title" style="display:flex;align-items:center;gap:6px;">
+      <span id="sync-dot" style="width:8px;height:8px;border-radius:50%;background:var(--ink-faint);display:inline-block;"></span>
+      실시간 동기화
     </div>
-    <button class="add-btn" id="export-btn">⬇ holdings.json 다운로드</button>
-    <div style="font-size:10.5px;color:var(--ink-faint);margin-top:8px;margin-bottom:14px;line-height:1.5;">
-      순서: 다운로드 → GitHub 저장소 페이지 열기 → 파일 목록 위에 다운로드한 파일을 드래그 →
-      상단에 나오는 "Commit changes" 버튼 클릭.
+    <div style="font-size:11.5px;color:var(--ink-soft);line-height:1.6;margin-bottom:10px;" id="sync-status-text">
+      연결 중...
     </div>
-    <div style="border-top:1px dashed var(--border);padding-top:12px;">
-      <div style="font-size:11.5px;color:var(--ink-soft);line-height:1.6;margin-bottom:10px;">
-        다른 기기·다른 주소에서 쓰던 holdings.json 파일이 있다면 여기로 불러올 수 있습니다.
-      </div>
-      <button class="add-btn" id="import-btn">📤 holdings.json 불러오기</button>
-      <input type="file" id="import-file-input" accept="application/json,.json" style="display:none;">
+    <div style="border-top:1px dashed var(--border);padding-top:10px;display:flex;gap:8px;">
+      <button class="add-btn" id="backup-export-btn" style="flex:1;font-size:12px;padding:10px;">⬇ 백업 다운로드 (JSON)</button>
     </div>
   </div>
 
@@ -328,62 +320,126 @@
 
 <div class="toast" id="toast"></div>
 
+<!-- ════════════════════════════════════════════════════════
+     Firebase 실시간 동기화 초기화
+     - 위스키관리 앱과 같은 Firebase 프로젝트를 공유하되,
+       데이터 경로는 'pension/main' 문서로 완전히 분리되어 있음
+       (Firestore 보안 규칙에서 /whiskies·/users 와 /pension을 서로
+       다른 접근 조건으로 나눠뒀기 때문에 두 앱의 데이터는 섞이지 않음)
+     - 익명 인증만 사용 (별도 로그인 화면 없음)
+════════════════════════════════════════════════════════ -->
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
+  import { getAuth, signInAnonymously, onAuthStateChanged }
+    from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
+  import { getFirestore, doc, onSnapshot, setDoc, serverTimestamp }
+    from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyAV_KEUXZ_1bmLWF4po3hsw0dAUvRQYfr8",
+    authDomain: "whiskey-manager-1331f.firebaseapp.com",
+    projectId: "whiskey-manager-1331f",
+    storageBucket: "whiskey-manager-1331f.firebasestorage.app",
+    messagingSenderId: "922010099908",
+    appId: "1:922010099908:web:2ab71531625235b33b2991"
+  };
+
+  const fbApp = initializeApp(firebaseConfig);
+  const auth = getAuth(fbApp);
+  const db = getFirestore(fbApp);
+
+  // 연금 앱의 나머지(classic) 스크립트에서 쓸 수 있도록 전역에 노출
+  window.FB = { db, doc, onSnapshot, setDoc, serverTimestamp };
+
+  onAuthStateChanged(auth, (user) => {
+    if (user) {
+      window.dispatchEvent(new CustomEvent('fb-ready'));
+    }
+  });
+
+  signInAnonymously(auth).catch(err => {
+    console.error('익명 로그인 실패:', err);
+    window.dispatchEvent(new CustomEvent('fb-error', { detail: err.message }));
+  });
+</script>
+
 <script>
 const PALETTE = ['#1F6F54','#C23B33','#2F5FA0','#B8862F','#6B4FA0','#3E8E7E','#A0522F','#5B6472'];
 
 let holdings = [];
 const nf = new Intl.NumberFormat('ko-KR');
 
+// 백업용 JSON 다운로드 (실시간 동기화와는 별개, 만약을 위한 안전장치)
 function downloadHoldingsJson(){
   const json = JSON.stringify(holdings, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'holdings.json';
+  a.download = 'pension-holdings-backup-' + new Date().toISOString().slice(0,10) + '.json';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  flashToast('holdings.json 다운로드됨');
+  flashToast('백업 파일 다운로드됨');
+}
+document.getElementById('backup-export-btn').addEventListener('click', downloadHoldingsJson);
+
+// ── Firestore 실시간 동기화 ──────────────────────────────────
+// index.html 상단의 Firebase 모듈 스크립트가 초기화를 마치고 익명 로그인에
+// 성공하면 'fb-ready' 이벤트를 쏘고, window.FB에 필요한 함수들을 담아준다.
+let fbDocRef = null;
+let fbSyncStarted = false;
+let isFirstSnapshot = true;
+
+function setSyncStatus(state, text){
+  const dot = document.getElementById('sync-dot');
+  const label = document.getElementById('sync-status-text');
+  if(!dot || !label) return;
+  const colors = { connecting: 'var(--ink-faint)', synced: 'var(--accent)', error: 'var(--up)' };
+  dot.style.background = colors[state] || colors.connecting;
+  label.textContent = text;
 }
 
-document.getElementById('export-btn').addEventListener('click', downloadHoldingsJson);
+function initFirestoreSync(){
+  if(fbSyncStarted) return; // onAuthStateChanged가 재실행되어도 리스너 중복 등록 방지
+  fbSyncStarted = true;
 
-document.getElementById('import-btn').addEventListener('click', ()=>{
-  document.getElementById('import-file-input').click();
-});
+  const { db, doc, onSnapshot } = window.FB;
+  fbDocRef = doc(db, 'pension', 'main');
 
-document.getElementById('import-file-input').addEventListener('change', (e)=>{
-  const file = e.target.files[0];
-  if(!file) return;
-
-  const reader = new FileReader();
-  reader.onload = (evt)=>{
-    try{
-      const parsed = JSON.parse(evt.target.result);
-      if(!Array.isArray(parsed)) throw new Error('형식이 올바르지 않습니다 (배열이어야 함)');
-
-      // id가 없는 항목은 새로 부여 (다른 곳에서 만든 파일 호환용)
-      holdings = parsed.map((h, i)=>({
-        id: h.id || ('h' + Date.now() + '_' + i),
-        name: h.name || '이름 없음',
-        ticker: h.ticker || '',
-        shares: h.shares ?? 0,
-        avgPrice: h.avgPrice ?? 0,
-        currentPrice: h.currentPrice ?? 0,
-      }));
-
-      render();
-      saveHoldings(true);
-      flashToast(`${holdings.length}개 종목 불러옴`);
-    }catch(err){
-      flashToast('불러오기 실패: ' + err.message);
+  onSnapshot(fbDocRef, (snap)=>{
+    if(snap.exists()){
+      const data = snap.data();
+      holdings = Array.isArray(data.holdings) ? data.holdings : [];
+    } else if(isFirstSnapshot){
+      // 클라우드에 아직 문서가 없는 최초 상태 → 이 기기의 로컬 캐시(있다면)를 그대로 클라우드에 업로드
+      holdings = holdings.length ? holdings : seedData();
     }
-  };
-  reader.readAsText(file);
 
-  e.target.value = ''; // 같은 파일 다시 선택 가능하도록 초기화
+    localStorage.setItem('holdings', JSON.stringify(holdings));
+    localStorage.setItem('lastUpdated', new Date().toISOString());
+    render();
+    updateLastUpdated();
+    setSyncStatus('synced', '동기화됨 · 다른 기기와 실시간으로 연결되어 있습니다');
+
+    if(!isFirstSnapshot){
+      flashToast('다른 기기에서 변경사항이 반영됨');
+    }
+    if(isFirstSnapshot && !snap.exists()){
+      // 최초 접속인데 클라우드 문서가 아직 없다면 이 기기 데이터로 문서를 생성
+      saveHoldings(false);
+    }
+    isFirstSnapshot = false;
+  }, (err)=>{
+    console.error('Firestore 동기화 오류:', err);
+    setSyncStatus('error', '동기화 실패 — 오프라인 데이터로 표시 중 (인터넷 연결을 확인해주세요)');
+  });
+}
+
+window.addEventListener('fb-ready', initFirestoreSync);
+window.addEventListener('fb-error', (e)=>{
+  setSyncStatus('error', '연결 실패: ' + (e.detail || '알 수 없는 오류') + ' — 오프라인 데이터로 표시 중');
 });
 
 function fmtWon(n){ return (n<0?'-':'') + Math.round(Math.abs(n)).toLocaleString('ko-KR') + '원'; }
@@ -403,26 +459,23 @@ function computeTotal(){
   return holdings.reduce((sum,h)=> sum + calcRow(h).value, 0);
 }
 
+// 페이지를 열자마자 로컬 캐시로 즉시 화면을 그려서 체감 속도를 확보하고,
+// 곧이어 Firestore 실시간 리스너(initFirestoreSync)가 최신 값으로 덮어씀
 async function loadHoldings(){
   try{
     const raw = localStorage.getItem('holdings');
-    if(raw){
-      holdings = JSON.parse(raw);
-    } else {
-      holdings = seedData();
-      await saveHoldings(false);
-    }
+    holdings = raw ? JSON.parse(raw) : seedData();
   }catch(e){
     holdings = seedData();
-    await saveHoldings(false);
   }
   render();
+  updateLastUpdated();
 }
 
 function seedData(){
   // 공개 저장소로 배포되므로 실제 보유 종목 숫자를 코드에 넣지 않습니다.
-  // 처음 여는 브라우저는 빈 상태로 시작하고, "+ 종목 추가"로 직접 입력하시면 됩니다.
-  // (이미 사용 중이던 브라우저는 저장된 localStorage 데이터를 그대로 불러오므로 영향 없습니다.)
+  // 처음 여는 기기는 빈 상태로 시작하고, Firestore에 이미 데이터가 있다면
+  // initFirestoreSync가 즉시 그 값으로 채워줍니다.
   return [];
 }
 
@@ -431,10 +484,17 @@ async function saveHoldings(showToast=true){
   try{
     localStorage.setItem('holdings', JSON.stringify(holdings));
     localStorage.setItem('lastUpdated', new Date().toISOString());
+
+    if(window.FB && fbDocRef){
+      const { setDoc, serverTimestamp } = window.FB;
+      await setDoc(fbDocRef, { holdings, updatedAt: serverTimestamp() });
+    }
+
     if(showToast) flashToast('저장됨');
     updateLastUpdated();
   }catch(e){
-    if(showToast) flashToast('저장 실패 — 다시 시도해주세요');
+    console.error('저장 실패:', e);
+    if(showToast) flashToast('저장 실패 — 인터넷 연결을 확인해주세요');
   }
 }
 
