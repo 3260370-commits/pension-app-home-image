@@ -299,6 +299,11 @@
     </div>
     <div style="border-top:1px dashed var(--border);padding-top:10px;display:flex;gap:8px;">
       <button class="add-btn" id="backup-export-btn" style="flex:1;font-size:12px;padding:10px;">⬇ 백업 다운로드 (JSON)</button>
+      <button class="add-btn" id="restore-import-btn" style="flex:1;font-size:12px;padding:10px;">📥 백업 불러오기 (복구용)</button>
+      <input type="file" id="restore-file-input" accept="application/json,.json" style="display:none;">
+    </div>
+    <div style="font-size:10px;color:var(--ink-faint);margin-top:8px;line-height:1.5;">
+      "백업 불러오기"는 이 기기와 클라우드(다른 모든 기기)의 현재 데이터를 선택한 파일 내용으로<b>완전히 덮어씁니다.</b> 잘못된 값이 동기화됐을 때 되돌리는 용도로만 사용하세요.
     </div>
   </div>
 
@@ -384,6 +389,49 @@ function downloadHoldingsJson(){
   flashToast('백업 파일 다운로드됨');
 }
 document.getElementById('backup-export-btn').addEventListener('click', downloadHoldingsJson);
+
+// 백업 파일로 복구 — 클라우드에 잘못된 값이 동기화됐을 때 되돌리는 비상용 기능
+document.getElementById('restore-import-btn').addEventListener('click', ()=>{
+  document.getElementById('restore-file-input').click();
+});
+
+document.getElementById('restore-file-input').addEventListener('change', (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (evt)=>{
+    try{
+      const parsed = JSON.parse(evt.target.result);
+      if(!Array.isArray(parsed)) throw new Error('형식이 올바르지 않습니다 (배열이어야 함)');
+
+      const restored = parsed.map((h, i)=>({
+        id: h.id || ('h' + Date.now() + '_' + i),
+        name: h.name || '이름 없음',
+        ticker: h.ticker || '',
+        shares: h.shares ?? 0,
+        avgPrice: h.avgPrice ?? 0,
+        currentPrice: h.currentPrice ?? 0,
+      }));
+
+      const ok = window.confirm(
+        `${restored.length}개 종목으로 복구합니다.\n` +
+        `이 기기와 클라우드(다른 모든 기기)의 현재 데이터가 이 파일 내용으로 완전히 대체됩니다.\n` +
+        `계속하시겠습니까?`
+      );
+      if(!ok){ e.target.value = ''; return; }
+
+      holdings = restored;
+      render();
+      saveHoldings(true); // localStorage + Firestore(pension/main) 둘 다 덮어씀
+      flashToast(`${holdings.length}개 종목으로 복구 완료`);
+    }catch(err){
+      flashToast('복구 실패: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = '';
+});
 
 // ── Firestore 실시간 동기화 ──────────────────────────────────
 // index.html 상단의 Firebase 모듈 스크립트가 초기화를 마치고 익명 로그인에
